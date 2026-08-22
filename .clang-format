@@ -1,0 +1,40 @@
+Standard: c++20
+
+UseTab: ForIndentation
+IndentWidth: 8
+TabWidth: 8
+AccessModifierOffset: -8
+ContinuationIndentWidth: 8
+ConstructorInitializerIndentWidth: 8
+MaxEmptyLinesToKeep: 1
+NamespaceIndentation: None
+
+ColumnLimit: 140
+BreakBeforeBraces: Attach
+AlwaysBreakTemplateDeclarations: Yes
+
+DerivePointerAlignment: false
+PointerAlignment: Left
+QualifierAlignment: Right
+
+AllowShortFunctionsOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortLambdasOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+
+AlignConsecutiveAssignments: Consecutive
+AlignAfterOpenBracket: Align
+AlignConsecutiveMacros: true
+AlignTrailingComments:
+  Kind: Always
+  OverEmptyLines: 1
+
+IndentPPDirectives: BeforeHash
+AlignEscapedNewlines: Right
+SortIncludes: true
+
+BreakConstructorInitializers: BeforeComma
+PackConstructorInitializers: Never
