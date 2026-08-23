@@ -1,33 +1,93 @@
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+
 #include <fmt/core.h>
+
+#include <sol/forward.hpp>
 #include <sol/sol.hpp>
-#include <vector>
+
+struct string_hash final {
+	using is_transparent = void;
+	using hash_type      = std::hash<std::string_view>;
+
+	size_t operator()(std::string_view str) const {
+		return hash_type{}(str);
+	}
+
+	size_t operator()(std::string const& str) const {
+		return hash_type{}(str);
+	}
+
+	size_t operator()(char const* str) const {
+		return hash_type{}(str);
+	}
+};
 
 template <typename T>
-struct modifiable {
-	modifiable() noexcept          = default;
-	virtual ~modifiable() noexcept = default;
-	static inline std::vector<sol::table> modifications;
+using string_map = std::unordered_map<std::string, T, string_hash, std::equal_to<>>;
+
+template <typename T>
+struct lua_modifiable {
+	lua_modifiable() noexcept          = default;
+	virtual ~lua_modifiable() noexcept = default;
+
+	[[nodiscard]] static sol::usertype<T> create_lua_usertype(sol::state_view lua, std::string_view name) {
+		sol::usertype<T> out = lua.new_usertype<T>(name);
+		out["modify"]        = [name](sol::this_state s) -> sol::table {
+			sol::state_view lua_v(s);
+			sol::table out                    = lua_v.create_table();
+			sol::table mt                     = lua_v.create_table();
+			mt[sol::meta_function::new_index] = [name](sol::this_state s, sol::table t, sol::object key,
+			                                           sol::object value) -> void {
+				t.raw_set(key, value);
+
+				if (key.get_type() != sol::type::string || value.get_type() != sol::type::function) {
+					return;
+				}
+
+				sol::state_view lua_v(s);
+				std::string key_str     = key.as<std::string>();
+				sol::object maybe_bound = lua_v[name][key_str];
+
+				if (!maybe_bound.valid() || maybe_bound.get_type() != sol::type::function) {
+					return;
+				}
+
+				T::hooked_functions[key_str].emplace_back(value.as<sol::protected_function>());
+				fmt::println("enabled function hook for \"{}:{}\" | table: {} | detour: {}", name, key_str, t.pointer(),
+				             value.pointer());
+			};
+			out[sol::metatable_key] = mt;
+			return out;
+		};
+		return out;
+	}
+
 	template <typename Original, typename... Args>
-	auto lua_intercept(std::string_view lua_index, Original original, Args... args) {
-		using ret      = std::invoke_result_t<Original, T*, Args...>;
-		auto intercept = [=, this](auto&& intercept_, Args... intercept_args, size_t i = 0) -> ret {
-			if (i >= modifications.size()) {
-				return std::invoke(original, dynamic_cast<T*>(this), intercept_args...);
+	auto lua_intercept(std::string_view key, Original original, Args... args) {
+		T* this_ = dynamic_cast<T*>(this);
+
+		if (!T::hooked_functions.contains(key)) {
+			return std::invoke(original, this_, args...);
+		}
+
+		using ret    = std::invoke_result_t<Original, T*, Args...>;
+		auto detours = T::hooked_functions[std::string(key)];
+
+		auto intercept = [&detours, original, this_](auto&& intercept_, Args... intercept_args, size_t i = 0) -> ret {
+			if (i >= detours.size()) {
+				return std::invoke(original, this_, intercept_args...);
 			}
 
-			sol::object maybe_detour   = modifications[i][lua_index];
-			bool const is_detour_valid = maybe_detour.valid() && (maybe_detour.get_type() == sol::type::function);
-
-			std::function<ret(Args...)> super = [=](Args... super_args) -> ret {
+			sol::protected_function detour    = detours[i];
+			std::function<ret(Args...)> super = [intercept_, i](Args... super_args) -> ret {
 				return intercept_(intercept_, super_args..., (i + 1));
 			};
 
-			if (!is_detour_valid) {
-				return super(intercept_args...);
-			}
-
-			sol::protected_function detour     = maybe_detour.as<sol::protected_function>();
-			sol::protected_function_result res = detour(dynamic_cast<T*>(this), super, intercept_args...);
+			sol::protected_function_result res = detour(this_, super, intercept_args...);
 
 			if (!res.valid()) {
 				sol::error e = res;
@@ -42,11 +102,14 @@ struct modifiable {
 				return res.get<ret>();
 			}
 		};
+
 		return intercept(intercept, args...);
 	}
+
+	static inline string_map<std::vector<sol::protected_function>> hooked_functions;
 };
 
-class apple final : public modifiable<apple> {
+class apple final : public lua_modifiable<apple> {
 public:
 	apple() noexcept;
 	~apple() noexcept override;
@@ -101,17 +164,11 @@ int main() {
 	using enum sol::lib;
 	lua.open_libraries(base, string, table, math, utf8);
 
-	sol::usertype<apple> lua_apple           = lua.new_usertype<apple>("apple");
+	sol::usertype<apple> lua_apple           = apple::create_lua_usertype(lua, "apple");
 	lua_apple[sol::meta_function::construct] = sol::constructors<apple()>();
 	lua_apple["banana"]                      = &apple::banana;
 	lua_apple["cantaloupe"]                  = &apple::cantaloupe;
 	lua_apple["elderberry"]                  = &apple::elderberry;
-	lua_apple["modify"]                      = [](sol::this_state s) -> sol::table {
-		sol::state_view lua_v(s);
-		sol::table out = lua_v.create_table();
-		apple::modifications.push_back(out);
-		return out;
-	};
 
 	auto scr_on_err = [](lua_State*, sol::protected_function_result res) -> sol::protected_function_result {
 		sol::error e = res;
@@ -122,6 +179,7 @@ int main() {
 	sol::protected_function_result scr_res = lua.safe_script_file("test.lua", scr_env, scr_on_err);
 
 	if (!scr_res.valid()) {
+		apple::hooked_functions.clear();
 		return -1;
 	}
 
@@ -132,6 +190,6 @@ int main() {
 	fmt::println("a.cantaloupe was {}", v);
 	a.elderberry(4);
 
-	apple::modifications.clear();
+	apple::hooked_functions.clear();
 	return 0;
 }
