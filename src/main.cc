@@ -4,6 +4,7 @@
 #include <string_view>
 #include <unordered_map>
 
+#include <fmt/color.h>
 #include <fmt/core.h>
 
 #include <sol/forward.hpp>
@@ -29,167 +30,163 @@ struct string_hash final {
 template <typename T>
 using string_map = std::unordered_map<std::string, T, string_hash, std::equal_to<>>;
 
-template <typename T>
-struct lua_modifiable {
-	lua_modifiable() noexcept          = default;
-	virtual ~lua_modifiable() noexcept = default;
+class intercepted_apple;
 
-	[[nodiscard]] static sol::usertype<T> create_lua_usertype(sol::state_view lua, std::string_view name) {
-		sol::usertype<T> out = lua.new_usertype<T>(name);
-		out["modify"]        = [name](sol::this_state s) -> sol::table {
-			sol::state_view lua_v(s);
-			sol::table out                    = lua_v.create_table();
-			sol::table mt                     = lua_v.create_table();
-			mt[sol::meta_function::new_index] = [name](sol::this_state s, sol::table t, sol::object key,
-			                                           sol::object value) -> void {
-				t.raw_set(key, value);
-
-				if (key.get_type() != sol::type::string || value.get_type() != sol::type::function) {
-					return;
-				}
-
-				sol::state_view lua_v(s);
-				std::string key_str     = key.as<std::string>();
-				sol::object maybe_bound = lua_v[name][key_str];
-
-				if (!maybe_bound.valid() || maybe_bound.get_type() != sol::type::function) {
-					return;
-				}
-
-				T::hooked_functions[key_str].emplace_back(value.as<sol::protected_function>());
-				fmt::println("enabled function hook for \"{}:{}\" | table: {} | detour: {}", name, key_str, t.pointer(),
-				             value.pointer());
-			};
-			out[sol::metatable_key] = mt;
-			return out;
-		};
-		return out;
+class apple {
+public:
+	virtual void banana() {
+		fmt::println("hello from apple::banana");
 	}
 
-	template <typename Original, typename... Args>
-	auto lua_intercept(std::string_view key, Original original, Args... args) {
-		T* this_ = dynamic_cast<T*>(this);
+	using intercept_type = intercepted_apple;
+};
 
-		if (!T::hooked_functions.contains(key)) {
-			return std::invoke(original, this_, args...);
+template <typename T>
+concept interceptable = requires { typename T::intercept_type; };
+
+struct lua_detour final {
+	sol::protected_function fn;
+	size_t priority;
+};
+
+template <typename Intercept, interceptable Base>
+struct intercepted : public Base {
+	template <typename Fn, typename... Args>
+	auto divert(std::string_view lua_key, Fn destination, Args... args) {
+		using ret  = std::invoke_result_t<Fn, Base*, Args...>;
+		Base* self = dynamic_cast<Base*>(this);
+
+		if (hooks.empty() || !hooks.contains(lua_key)) {
+			return std::invoke(destination, self, std::forward<Args>(args)...);
 		}
 
-		using ret    = std::invoke_result_t<Original, T*, Args...>;
-		auto detours = T::hooked_functions[std::string(key)];
-
-		auto intercept = [&detours, original, this_](auto&& intercept_, Args... intercept_args, size_t i = 0) -> ret {
+		auto curhook  = hooks.find(lua_key);
+		auto& detours = curhook->second;
+		auto chain    = [&](auto& inner_chain, Args... chain_args, size_t i = 0) -> ret {
 			if (i >= detours.size()) {
-				return std::invoke(original, this_, intercept_args...);
+				return std::invoke(destination, self, chain_args...);
 			}
 
-			sol::protected_function detour    = detours[i];
-			std::function<ret(Args...)> super = [intercept_, i](Args... super_args) -> ret {
-				return intercept_(intercept_, super_args..., (i + 1));
+			auto& detour = detours[i].fn;
+			auto super   = [&](Args... super_args) -> ret {
+				return inner_chain(inner_chain, super_args..., i + 1);
 			};
 
-			sol::protected_function_result res = detour(this_, super, intercept_args...);
+			sol::protected_function_result res = detour(self, super, chain_args...);
 
 			if (!res.valid()) {
 				sol::error e = res;
 				fmt::println(fmt::runtime(e.what()));
-				return super(intercept_args...);
+				return super(chain_args...);
 			}
 
 			if constexpr (!std::is_void_v<ret>) {
 				if (res.return_count() <= 0) {
-					return super(intercept_args...);
+					return super(chain_args...);
 				}
 				return res.get<ret>();
 			}
 		};
 
-		return intercept(intercept, args...);
+		return chain(chain, args...);
 	}
 
-	static inline string_map<std::vector<sol::protected_function>> hooked_functions;
+	static void remove_detours() {
+		hooks.clear();
+	}
+
+	static inline string_map<std::vector<lua_detour>> hooks;
 };
 
-class apple final : public lua_modifiable<apple> {
-public:
-	apple() noexcept;
-	~apple() noexcept override;
+struct intercept_cleaner final {
+	static void schedule_for_cleanup(void (*fn)()) {
+		if (std::ranges::find(scheduled, fn) == scheduled.end()) {
+			scheduled.push_back(fn);
+		}
+	}
 
-	void banana();
-	bool cantaloupe();
-	int elderberry(int num);
+	static void cleanup() {
+		for (auto it = scheduled.begin(); it != scheduled.end();) {
+			(*it)();
+			it = scheduled.erase(it);
+		}
+	}
 
-private:
-	void fuji_();
-	struct proto;
+	static inline std::vector<void (*)()> scheduled;
 };
 
-struct apple::proto final {
-	static void banana(apple*) {
-		fmt::println("banana");
-	}
-
-	static bool cantaloupe(apple*) {
-		fmt::println("cantaloupe");
-		return true;
-	}
-
-	static int elderberry(apple* this_, int a) {
-		fmt::println("elderberry | {}", a);
-		this_->fuji_();
-		return a;
+struct intercepted_apple final : intercepted<intercepted_apple, apple> {
+	void banana() override {
+		return this->divert("banana", [](apple* s) -> void {
+			return s->apple::banana();
+		});
 	}
 };
-
-apple::apple() noexcept  = default;
-apple::~apple() noexcept = default;
-
-void apple::banana() {
-	this->lua_intercept("banana", &proto::banana);
-}
-
-bool apple::cantaloupe() {
-	return this->lua_intercept("cantaloupe", &proto::cantaloupe);
-}
-
-int apple::elderberry(int a) {
-	return this->lua_intercept("elderberry", &proto::elderberry, a);
-}
-
-void apple::fuji_() {
-	fmt::println("fuji_");
-}
 
 int main() {
 	sol::state lua;
 	using enum sol::lib;
 	lua.open_libraries(base, string, table, math, utf8);
 
-	sol::usertype<apple> lua_apple           = apple::create_lua_usertype(lua, "apple");
-	lua_apple[sol::meta_function::construct] = sol::constructors<apple()>();
-	lua_apple["banana"]                      = &apple::banana;
-	lua_apple["cantaloupe"]                  = &apple::cantaloupe;
-	lua_apple["elderberry"]                  = &apple::elderberry;
+	sol::usertype<intercepted_apple> lua_apple = lua.new_usertype<intercepted_apple>("apple");
+	lua_apple["modify"]                        = [](sol::this_state s) -> sol::table {
+		sol::state_view lua_v(s);
+		sol::table out = lua_v.create_table();
+		sol::table mt  = lua_v.create_table();
 
-	auto scr_on_err = [](lua_State*, sol::protected_function_result res) -> sol::protected_function_result {
+		mt[sol::meta_function::new_index] = [](sol::this_state s, sol::table t, sol::object key, sol::object value) -> void {
+			t.raw_set(key, value);
+
+			if (key.get_type() != sol::type::string || value.get_type() != sol::type::function) {
+				return;
+			}
+
+			sol::state_view lua_v(s);
+			std::string key_str     = key.as<std::string>();
+			sol::object maybe_bound = lua_v["apple"][key_str];
+
+			if (!maybe_bound.valid() || maybe_bound.get_type() != sol::type::function) {
+				return;
+			}
+
+			auto& detours = intercepted_apple::hooks[key_str];
+			// todo: implement priority
+			detours.emplace_back(lua_detour{
+			        .fn       = value.as<sol::protected_function>(),
+			        .priority = detours.size(),
+			});
+
+			intercept_cleaner::schedule_for_cleanup(&intercepted_apple::remove_detours);
+			fmt::print(fg(fmt::color::dark_gray), "enabled function hook for \"apple:{}\" | table: {} | detour: {}\n", key_str,
+			           t.pointer(), value.pointer());
+		};
+
+		out[sol::metatable_key] = mt;
+		return out;
+	};
+
+	lua_apple[sol::meta_function::construct] = sol::constructors<intercepted_apple()>();
+	lua_apple["banana"]                      = &intercepted_apple::banana;
+
+	auto scr_err = [](sol::this_state, sol::protected_function_result res) -> sol::protected_function_result {
 		sol::error e = res;
 		fmt::println(fmt::runtime(e.what()));
 		return res;
 	};
+
 	sol::environment scr_env(lua, sol::create, lua.globals());
-	sol::protected_function_result scr_res = lua.safe_script_file("test.lua", scr_env, scr_on_err);
+	sol::protected_function_result scr_res = lua.safe_script_file("test.lua", scr_env, scr_err);
 
 	if (!scr_res.valid()) {
-		apple::hooked_functions.clear();
+		intercept_cleaner::cleanup();
 		return -1;
 	}
 
 	// test
-	apple a;
-	a.banana();
-	bool v = a.cantaloupe();
-	fmt::println("a.cantaloupe was {}", v);
-	a.elderberry(4);
+	intercepted_apple a;
+	apple* ptr = &a;
+	ptr->banana();
 
-	apple::hooked_functions.clear();
+	intercept_cleaner::cleanup();
 	return 0;
 }
