@@ -8,6 +8,7 @@ ContinuationIndentWidth: 8
 ConstructorInitializerIndentWidth: 8
 MaxEmptyLinesToKeep: 1
 NamespaceIndentation: None
+InsertBraces: true
 
 ColumnLimit: 140
 BreakBeforeBraces: Attach
@@ -17,7 +18,7 @@ DerivePointerAlignment: false
 PointerAlignment: Left
 QualifierAlignment: Right
 
-AllowShortFunctionsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: true
 AllowShortIfStatementsOnASingleLine: false
 AllowShortLoopsOnASingleLine: false
 AllowShortBlocksOnASingleLine: false
